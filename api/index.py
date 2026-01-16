@@ -3,42 +3,39 @@ import os
 import sys
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
-from dotenv import load_dotenv
-import numpy as np
-from typing import List
-import base64
-from io import BytesIO
-import nest_asyncio
-import aiohttp
-
-from livekit.plugins import groq, elevenlabs
-from livekit.agents.llm.chat_context import ChatContext
-from livekit import rtc
-
-# Allow nested event loops
-nest_asyncio.apply()
 
 # Load environment variables
-def _load_env_multi():
-    candidates = []
-    if getattr(sys, 'frozen', False):
-        candidates.append(os.path.dirname(sys.executable))
-    candidates.extend([os.getcwd(), os.path.dirname(__file__)])
-    seen = set()
-    for d in candidates:
-        if not d or d in seen:
-            continue
-        seen.add(d)
-        p = os.path.join(d, '.env')
-        if os.path.exists(p):
-            load_dotenv(dotenv_path=p)
+from dotenv import load_dotenv
+load_dotenv()
 
-_load_env_multi()
+import base64
+from io import BytesIO
+
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except:
+    pass
+
+try:
+    import aiohttp
+except ImportError:
+    print("WARNING: aiohttp not installed")
+
+try:
+    from livekit.plugins import groq, elevenlabs
+    from livekit.agents.llm.chat_context import ChatContext
+except ImportError as e:
+    print(f"WARNING: LiveKit imports failed: {e}")
 
 # Get absolute paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
+
+print(f"BASE_DIR: {BASE_DIR}")
+print(f"TEMPLATE_DIR: {TEMPLATE_DIR}")
+print(f"STATIC_DIR: {STATIC_DIR}")
 
 app = Flask(__name__, 
     static_folder=STATIC_DIR,
@@ -162,13 +159,26 @@ def tts_synthesize(text: str) -> bytes:
 @app.route('/')
 def index():
     """Serve the main page"""
-    return render_template('index.html')
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({'status': 'ok'})
 
 
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe():
     """Transcribe audio from client"""
     try:
+        if 'audio' not in request.files:
+            return jsonify({'success': False, 'error': 'No audio file provided'}), 400
+            
         audio_data = request.files['audio'].read()
         
         if not audio_data or len(audio_data) < 100:
@@ -191,6 +201,9 @@ def generate_reply():
     """Generate LLM reply for input text"""
     try:
         data = request.json
+        if not data:
+            return jsonify({'success': False, 'error': 'No JSON data'}), 400
+            
         user_text = data.get('text', '').strip()
         
         if not user_text:
@@ -213,6 +226,9 @@ def synthesize_speech():
     """Synthesize text to speech"""
     try:
         data = request.json
+        if not data:
+            return jsonify({'success': False, 'error': 'No JSON data'}), 400
+            
         text = data.get('text', '').strip()
         
         if not text:
@@ -227,7 +243,7 @@ def synthesize_speech():
         return jsonify({
             'success': True,
             'audio': audio_b64,
-            'sample_rate': REC_SAMPLE_RATE
+            'sample_rate': 24000
         })
     
     except Exception as e:

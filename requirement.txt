@@ -1,0 +1,10 @@
+Flask==3.0.0
+Flask-CORS==4.0.0
+python-dotenv==1.0.0
+aiohttp==3.9.1
+nest-asyncio==1.5.8
+livekit==0.8.3
+livekit-agents==0.9.0
+livekit-agents-groq==0.9.0
+elevenlabs==0.2.17
+numpy==1.24.3
