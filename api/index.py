@@ -1,41 +1,18 @@
 import asyncio
 import os
-import sys
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
+from dotenv import load_dotenv
+import base64
+import aiohttp
 
 # Load environment variables
-from dotenv import load_dotenv
 load_dotenv()
-
-import base64
-from io import BytesIO
-
-try:
-    import nest_asyncio
-    nest_asyncio.apply()
-except:
-    pass
-
-try:
-    import aiohttp
-except ImportError:
-    print("WARNING: aiohttp not installed")
-
-try:
-    from livekit.plugins import groq, elevenlabs
-    from livekit.agents.llm.chat_context import ChatContext
-except ImportError as e:
-    print(f"WARNING: LiveKit imports failed: {e}")
 
 # Get absolute paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
-
-print(f"BASE_DIR: {BASE_DIR}")
-print(f"TEMPLATE_DIR: {TEMPLATE_DIR}")
-print(f"STATIC_DIR: {STATIC_DIR}")
 
 app = Flask(__name__, 
     static_folder=STATIC_DIR,
@@ -53,64 +30,57 @@ REC_DTYPE = 'int16'
 def stt_transcribe_audio_bytes(audio_bytes: bytes) -> str:
     """Transcribe audio bytes using Groq API directly"""
     
-    async def _transcribe():
-        api_key = os.environ.get('GROQ_API_KEY', '')
-        if not api_key:
-            raise ValueError('GROQ_API_KEY not set in environment')
-        
-        url = "https://api.groq.com/openai/v1/audio/transcriptions"
-        headers = {
-            "Authorization": f"Bearer {api_key}"
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            data = aiohttp.FormData()
-            data.add_field('file', audio_bytes, filename='audio.wav', content_type='audio/wav')
-            data.add_field('model', 'whisper-large-v3-turbo')
-            data.add_field('language', 'en')
-            
-            async with session.post(url, data=data, headers=headers) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise Exception(f"Groq API error: {resp.status} - {error_text}")
-                result = await resp.json()
-                return result.get('text', '')
+    api_key = os.environ.get('GROQ_API_KEY', '')
+    if not api_key:
+        raise ValueError('GROQ_API_KEY not set in environment')
     
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_transcribe())
-    except RuntimeError:
-        return asyncio.run(_transcribe())
+    import requests
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    headers = {
+        "Authorization": f"Bearer {api_key}"
+    }
+    files = {
+        'file': ('audio.wav', audio_bytes, 'audio/wav'),
+    }
+    data = {
+        'model': 'whisper-large-v3-turbo',
+        'language': 'en',
+    }
+    
+    response = requests.post(url, headers=headers, files=files, data=data)
+    if response.status_code != 200:
+        raise Exception(f"Groq API error: {response.status_code} - {response.text}")
+    result = response.json()
+    return result.get('text', '')
 
 
 def llm_generate_reply(user_text: str) -> str:
     """Generate LLM reply using Groq"""
-    llm = groq.LLM(model='llama-3.3-70b-versatile')
-    chat = ChatContext()
-    chat.add_message(role="user", content=user_text)
-
-    async def _generate():
-        stream = llm.chat(chat_ctx=chat, tools=[], parallel_tool_calls=False)
-        reply: list[str] = []
-        try:
-            async for chunk in stream:
-                if chunk.delta and chunk.delta.content:
-                    reply.append(chunk.delta.content)
-        finally:
-            await stream.aclose()
-        return ''.join(reply).strip()
     
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_generate())
-    except RuntimeError:
-        return asyncio.run(_generate())
+    api_key = os.environ.get('GROQ_API_KEY', '')
+    if not api_key:
+        raise ValueError('GROQ_API_KEY not set in environment')
+    
+    import requests
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "user", "content": user_text}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 1024
+    }
+    
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code != 200:
+        raise Exception(f"Groq API error: {response.status_code} - {response.text}")
+    result = response.json()
+    return result['choices'][0]['message']['content'].strip()
 
 
 def tts_synthesize(text: str) -> bytes:
@@ -118,42 +88,31 @@ def tts_synthesize(text: str) -> bytes:
     if not text:
         return b''
     
-    async def _collect():
-        api_key = os.environ.get('ELEVEN_API_KEY', '')
-        voice_id = os.environ.get('ELEVEN_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL')
-        
-        if not api_key:
-            raise ValueError('ELEVEN_API_KEY not set in environment')
-        
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-        headers = {
-            "xi-api-key": api_key,
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "text": text,
-            "model_id": "eleven_turbo_v2_5",
-            "voice_settings": {
-                "stability": 0.5,
-                "similarity_boost": 0.75
-            }
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise Exception(f"ElevenLabs API error: {resp.status} - {error_text}")
-                return await resp.read()
+    api_key = os.environ.get('ELEVEN_API_KEY', '')
+    voice_id = os.environ.get('ELEVEN_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL')
     
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_collect())
-    except RuntimeError:
-        return asyncio.run(_collect())
+    if not api_key:
+        raise ValueError('ELEVEN_API_KEY not set in environment')
+    
+    import requests
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    headers = {
+        "xi-api-key": api_key,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "text": text,
+        "model_id": "eleven_turbo_v2_5",
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75
+        }
+    }
+    
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code != 200:
+        raise Exception(f"ElevenLabs API error: {response.status_code} - {response.text}")
+    return response.content
 
 
 @app.route('/')
