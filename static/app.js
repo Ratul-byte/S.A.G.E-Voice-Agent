@@ -6,8 +6,12 @@ class AudioVisualizer {
     constructor(canvasId) {
         this.canvas = document.getElementById(canvasId);
         this.ctx = this.canvas.getContext('2d');
-        this.analyser = null;
-        this.dataArray = null;
+        this.audioContext = null;
+        this.playbackAnalyser = null;
+        this.micAnalyser = null;
+        this.micSource = null;
+        this.activeAnalyser = null;
+        this.activeDataArray = null;
         this.animationId = null;
         this.isActive = false;
 
@@ -28,44 +32,80 @@ class AudioVisualizer {
         this.canvas.style.height = `${rect.height}px`;
     }
 
-    setup(audioElement) {
-        if (this.analyser) {
-            this.disconnect();
-        }
-
-        try {
+    ensureContext() {
+        if (!this.audioContext) {
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            const source = this.audioContext.createMediaElementSource(audioElement);
-            this.analyser = this.audioContext.createAnalyser();
+        }
+        return this.audioContext;
+    }
 
-            this.analyser.fftSize = 256;
-            this.analyser.smoothingTimeConstant = 0.8;
+    // Original playback visualizer: hooked to the <audio> element used for TTS replies.
+    setup(audioElement) {
+        try {
+            const ctx = this.ensureContext();
+            const source = ctx.createMediaElementSource(audioElement);
+            this.playbackAnalyser = ctx.createAnalyser();
+            this.playbackAnalyser.fftSize = 256;
+            this.playbackAnalyser.smoothingTimeConstant = 0.8;
 
-            const bufferLength = this.analyser.frequencyBinCount;
-            this.dataArray = new Uint8Array(bufferLength);
+            source.connect(this.playbackAnalyser);
+            // Must connect to destination or the audio element goes silent.
+            this.playbackAnalyser.connect(ctx.destination);
 
-            source.connect(this.analyser);
-            this.analyser.connect(this.audioContext.destination);
-            
-            console.log('Audio visualizer setup complete');
+            console.log('Playback visualizer setup complete');
         } catch (error) {
-            console.error('Failed to setup audio visualizer:', error);
+            console.error('Failed to setup playback visualizer:', error);
             // Don't throw - allow audio to work without visualizer
         }
     }
 
-    start() {
+    // New: hook the visualizer up to the user's live microphone stream so they
+    // get visual feedback ("am I actually being heard?") while recording.
+    setupMic(stream) {
+        try {
+            const ctx = this.ensureContext();
+            if (this.micSource) {
+                this.micSource.disconnect();
+            }
+            this.micSource = ctx.createMediaStreamSource(stream);
+            if (!this.micAnalyser) {
+                this.micAnalyser = ctx.createAnalyser();
+                this.micAnalyser.fftSize = 256;
+                this.micAnalyser.smoothingTimeConstant = 0.6;
+            }
+            // Intentionally NOT connected to ctx.destination - connecting a live
+            // mic straight to the speakers would cause an audio feedback loop.
+            this.micSource.connect(this.micAnalyser);
+            console.log('Mic visualizer setup complete');
+        } catch (error) {
+            console.error('Failed to setup mic visualizer:', error);
+        }
+    }
+
+    teardownMic() {
+        if (this.micSource) {
+            try { this.micSource.disconnect(); } catch (e) { /* already disconnected */ }
+            this.micSource = null;
+        }
+    }
+
+    start(mode = 'playback') {
+        this.activeAnalyser = mode === 'mic' ? this.micAnalyser : this.playbackAnalyser;
+        this.activeDataArray = this.activeAnalyser
+            ? new Uint8Array(this.activeAnalyser.frequencyBinCount)
+            : null;
+
         if (this.isActive) return;
         this.isActive = true;
         this.canvas.parentElement.classList.add('active');
-        
+
         // Resume AudioContext if suspended (browser autoplay policy)
         if (this.audioContext && this.audioContext.state === 'suspended') {
             this.audioContext.resume().then(() => {
                 console.log('AudioContext resumed');
             });
         }
-        
+
         this.animate();
     }
 
@@ -81,9 +121,10 @@ class AudioVisualizer {
 
     disconnect() {
         this.stop();
-        if (this.analyser) {
-            this.analyser.disconnect();
-            this.analyser = null;
+        this.teardownMic();
+        if (this.playbackAnalyser) {
+            this.playbackAnalyser.disconnect();
+            this.playbackAnalyser = null;
         }
     }
 
@@ -92,13 +133,13 @@ class AudioVisualizer {
 
         this.animationId = requestAnimationFrame(() => this.animate());
 
-        if (!this.analyser || !this.dataArray) {
+        if (!this.activeAnalyser || !this.activeDataArray) {
             this.drawBars([]);
             return;
         }
 
-        this.analyser.getByteFrequencyData(this.dataArray);
-        const frequencies = Array.from(this.dataArray);
+        this.activeAnalyser.getByteFrequencyData(this.activeDataArray);
+        const frequencies = Array.from(this.activeDataArray);
         this.drawBars(frequencies);
     }
 
@@ -318,7 +359,16 @@ class ChatUI {
 
     setRecordingState(isRecording) {
         this.micBtn.classList.toggle('recording', isRecording);
-        this.micBtn.disabled = isRecording;
+        // NOTE: previously this also set `this.micBtn.disabled = isRecording`,
+        // which made it impossible to click the button again to stop recording
+        // (disabled buttons don't fire click events). Keep it enabled so a
+        // second click always ends the user's turn.
+        this.micBtn.title = isRecording ? 'Click to stop and send' : 'Record voice';
+
+        const container = this.messageInput.closest('.input-container');
+        if (container) {
+            container.classList.toggle('listening', isRecording);
+        }
     }
 
     updateTranscript(text) {
@@ -390,12 +440,86 @@ class AudioRecorder {
     }
 }
 
+/**
+ * Best-effort LIVE captioning while the user speaks, using the browser's
+ * built-in SpeechRecognition (Chrome/Edge/Safari support it; Firefox doesn't).
+ * This is only used to show text in the input bar in real time - the actual
+ * message that gets sent still comes from the accurate Groq transcription
+ * of the recorded audio once the user stops recording.
+ */
+class LiveCaption {
+    constructor() {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        this.supported = !!SR;
+        if (this.supported) {
+            this.recognition = new SR();
+            this.recognition.continuous = true;
+            this.recognition.interimResults = true;
+            this.recognition.lang = 'en-US';
+        }
+        this.shouldRestart = false;
+    }
+
+    start(onUpdate) {
+        if (!this.supported) return;
+
+        this.finalText = '';
+        this.shouldRestart = true;
+
+        this.recognition.onresult = (event) => {
+            let interim = '';
+            let final = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                const piece = event.results[i][0].transcript;
+                if (event.results[i].isFinal) {
+                    final += piece;
+                } else {
+                    interim += piece;
+                }
+            }
+            this.finalText += final;
+            onUpdate((this.finalText + ' ' + interim).trim());
+        };
+
+        this.recognition.onerror = (event) => {
+            // "no-speech" / "aborted" fire routinely - not real errors, ignore them.
+            if (event.error !== 'no-speech' && event.error !== 'aborted') {
+                console.warn('Speech recognition error:', event.error);
+            }
+        };
+
+        // Some browsers auto-stop recognition after a short silence even while
+        // the user is still recording - restart it transparently so captions
+        // keep flowing for as long as recording is active.
+        this.recognition.onend = () => {
+            if (this.shouldRestart) {
+                try { this.recognition.start(); } catch (e) { /* already starting */ }
+            }
+        };
+
+        try {
+            this.recognition.start();
+        } catch (e) {
+            console.warn('Could not start live captioning:', e);
+        }
+    }
+
+    stop() {
+        this.shouldRestart = false;
+        if (this.supported) {
+            try { this.recognition.stop(); } catch (e) { /* not running */ }
+        }
+    }
+}
+
 class VTCApp {
     constructor() {
         this.ui = new ChatUI();
         this.recorder = new AudioRecorder();
         this.visualizer = new AudioVisualizer('audio-visualizer');
+        this.caption = new LiveCaption();
         this.audioPlayer = document.getElementById('audio-player');
+        this.visualizerLabel = document.querySelector('.visualizer-label');
 
         this.isRecording = false;
         this.lastReplyAudio = null;
@@ -403,6 +527,12 @@ class VTCApp {
 
         this.setupEventListeners();
         this.setupVisualizer();
+    }
+
+    setVisualizerLabel(text) {
+        if (this.visualizerLabel) {
+            this.visualizerLabel.textContent = text;
+        }
     }
 
     setupEventListeners() {
@@ -414,7 +544,8 @@ class VTCApp {
         this.visualizer.setup(this.audioPlayer);
 
         this.audioPlayer.addEventListener('play', () => {
-            this.visualizer.start();
+            this.setVisualizerLabel('Playing response...');
+            this.visualizer.start('playback');
         });
 
         this.audioPlayer.addEventListener('pause', () => {
@@ -440,25 +571,61 @@ class VTCApp {
             await this.recorder.start();
             this.isRecording = true;
             this.ui.setRecordingState(true);
-            this.ui.showStatus('Recording... Speak now', 'success');
+            this.ui.sendBtn.disabled = true;
+            this.ui.showStatus('Recording... click the mic again when done', 'success');
+
+            // Live mic-level visualizer so the user can SEE their voice is being picked up.
+            if (this.recorder.stream) {
+                this.visualizer.setupMic(this.recorder.stream);
+                this.setVisualizerLabel('Listening...');
+                this.visualizer.start('mic');
+            }
+
+            // Live captions: show what's being heard directly in the input bar
+            // as the user talks (best-effort - falls back gracefully if the
+            // browser doesn't support SpeechRecognition).
+            this.ui.messageInput.value = '';
+            this.ui.messageInput.readOnly = true;
+            this.ui.messageInput.placeholder = this.caption.supported
+                ? 'Listening...'
+                : 'Listening... (live captions not supported in this browser)';
+            this.caption.start((text) => {
+                this.ui.messageInput.value = text;
+            });
         } catch (error) {
             this.ui.showStatus(error.message, 'error');
             this.isRecording = false;
+            this.ui.setRecordingState(false);
         }
     }
 
     async stopRecording() {
         try {
             this.ui.showStatus('Processing audio...', 'info');
+
+            // Clicking the mic button again is the "I'm done talking" signal:
+            // stop listening/captioning/visualizing, then hand things to the agent.
+            this.caption.stop();
+            this.visualizer.stop();
+            this.visualizer.teardownMic();
+
             const audioBlob = await this.recorder.stop();
             this.isRecording = false;
             this.ui.setRecordingState(false);
+            this.ui.messageInput.readOnly = false;
+            this.ui.messageInput.value = '';
+            this.ui.messageInput.placeholder = 'Send a message...';
 
             await this.transcribeAudio(audioBlob);
         } catch (error) {
             this.ui.showStatus(error.message, 'error');
             this.isRecording = false;
             this.ui.setRecordingState(false);
+            this.ui.messageInput.readOnly = false;
+            this.ui.messageInput.placeholder = 'Send a message...';
+            this.caption.stop();
+            this.visualizer.stop();
+            this.visualizer.teardownMic();
         }
     }
 
