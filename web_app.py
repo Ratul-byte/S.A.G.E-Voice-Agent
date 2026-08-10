@@ -18,6 +18,8 @@ from livekit.agents.llm.chat_context import ChatContext
 from livekit.agents.utils.audio import AudioByteStream
 from livekit import rtc
 
+from prompts import SAGE_SYSTEM_PROMPT
+
 # Allow nested event loops (required for Flask threads)
 nest_asyncio.apply()
 
@@ -45,6 +47,18 @@ CORS(app)
 REC_SAMPLE_RATE = 24000
 REC_NUM_CHANNELS = 1
 REC_DTYPE = 'int16'
+
+# --- Conversation memory --------------------------------------------------
+# This is a single-user local assistant (one browser talking to one server
+# process), so a simple in-process history is enough to give SAGE context
+# across turns - no need for per-session/database complexity.
+conversation_history: List[dict] = []
+history_lock = threading.Lock()
+
+# Cap how many past turns we send back to the LLM each time, to keep token
+# usage/latency bounded. A "turn" here is one user message + one assistant
+# reply, so this keeps roughly the last 12 exchanges.
+MAX_HISTORY_TURNS = 12
 
 
 def stt_transcribe_audio_bytes(audio_bytes: bytes) -> str:
@@ -84,9 +98,21 @@ def stt_transcribe_audio_bytes(audio_bytes: bytes) -> str:
 
 
 def llm_generate_reply(user_text: str) -> str:
-    """Generate LLM reply using Groq"""
+    """Generate LLM reply using Groq, grounded in SAGE's identity and the
+    ongoing conversation history so it has context across turns."""
     llm = groq.LLM(model='llama-3.3-70b-versatile')
     chat = ChatContext()
+
+    # SAGE's identity/personality always goes in first, as the system message.
+    chat.add_message(role="system", content=SAGE_SYSTEM_PROMPT)
+
+    # Replay recent conversation history so the model has context.
+    with history_lock:
+        history_snapshot = list(conversation_history)
+
+    for turn in history_snapshot:
+        chat.add_message(role=turn['role'], content=turn['content'])
+
     chat.add_message(role="user", content=user_text)
 
     async def _generate():
@@ -106,10 +132,21 @@ def llm_generate_reply(user_text: str) -> str:
             # If loop is already running, create a new one
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_generate())
+        reply_text = loop.run_until_complete(_generate())
     except RuntimeError:
         # No event loop in this thread, create one
-        return asyncio.run(_generate())
+        reply_text = asyncio.run(_generate())
+
+    # Persist this exchange to memory for future turns, trimming old history
+    # so the context sent to the LLM doesn't grow without bound.
+    with history_lock:
+        conversation_history.append({'role': 'user', 'content': user_text})
+        conversation_history.append({'role': 'assistant', 'content': reply_text})
+        max_messages = MAX_HISTORY_TURNS * 2
+        if len(conversation_history) > max_messages:
+            del conversation_history[:len(conversation_history) - max_messages]
+
+    return reply_text
 
 
 def tts_synthesize(text: str) -> bytes:
@@ -234,6 +271,14 @@ def synthesize_speech():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': error_msg}), 500
+
+
+@app.route('/api/reset-conversation', methods=['POST'])
+def reset_conversation():
+    """Clear SAGE's conversation memory and start a fresh context."""
+    with history_lock:
+        conversation_history.clear()
+    return jsonify({'success': True})
 
 
 if __name__ == '__main__':
