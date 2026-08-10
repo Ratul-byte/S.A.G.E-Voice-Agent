@@ -434,6 +434,18 @@ body {
     box-shadow: 0 0 0 2px rgba(16, 163, 127, 0.2);
 }
 
+/* Whole input bar glows red while actively recording, on top of the pulsing
+   mic button and the mic-level visualizer, so it's unmistakable that voice
+   input is live and being picked up. */
+.input-container.listening {
+    border-color: #ef4444;
+    box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
+}
+
+#message-input[readonly] {
+    cursor: default;
+}
+
 #message-input {
     flex: 1;
     background: transparent;
