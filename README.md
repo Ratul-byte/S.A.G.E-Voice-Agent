@@ -1,10 +1,6 @@
-# SAGE — Voice & Web AI Assistant
+# SAGE — Smart Agent for Guided Execution
 
-**SAGE** is a modern web-based AI assistant that supports both text and voice interaction. It combines conversational memory, real-time voice capabilities, AI reasoning, web access, and practical utility tools into a single assistant.
-
-SAGE uses **Groq/Llama** for language generation, **Groq STT** for speech recognition, and **ElevenLabs** for text-to-speech.
-
-> **SAGE is the assistant's identity.** Llama/Groq are underlying AI services and are not presented as the assistant's name.
+**SAGE** is a modern web-based AI assistant that supports both text and voice interaction. It combines conversational memory, real-time voice capabilities, AI reasoning, web access, and practical utility tools into a single assistant. SAGE uses **Groq/Llama** for language generation, **Groq STT** for speech recognition, and **ElevenLabs** for text-to-speech.
 
 ---
 
