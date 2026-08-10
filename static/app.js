@@ -198,6 +198,7 @@ class ChatUI {
         this.micBtn = document.getElementById('mic-btn');
         this.sendBtn = document.getElementById('send-btn');
         this.themeToggle = document.getElementById('theme-toggle');
+        this.newChatBtn = document.getElementById('new-chat-btn');
         this.statusToast = document.getElementById('status-toast');
         this.audioPlayer = document.getElementById('audio-player');
         this.messageCounter = 0;
@@ -218,6 +219,9 @@ class ChatUI {
         this.sendBtn.addEventListener('click', () => this.handleSend());
         this.micBtn.addEventListener('click', () => this.handleMicToggle());
         this.themeToggle.addEventListener('click', () => this.toggleTheme());
+        this.newChatBtn.addEventListener('click', () => {
+            window.dispatchEvent(new CustomEvent('newChat'));
+        });
 
         // Auto-resize textarea
         this.messageInput.addEventListener('input', () => {
@@ -263,6 +267,15 @@ class ChatUI {
 
     addWelcomeMessage() {
         // Welcome message is already in HTML
+    }
+
+    clearMessages() {
+        this.messagesList.innerHTML = '';
+        this.messageCounter = 0;
+        const welcomeMsg = document.querySelector('.welcome-message');
+        if (welcomeMsg) {
+            welcomeMsg.style.display = '';
+        }
     }
 
     addMessage(role, text, isLoading = false) {
@@ -538,6 +551,19 @@ class VTCApp {
     setupEventListeners() {
         window.addEventListener('sendMessage', (e) => this.sendMessage(e.detail.text, { addUser: true }));
         window.addEventListener('toggleRecording', () => this.toggleRecording());
+        window.addEventListener('newChat', () => this.resetConversation());
+    }
+
+    async resetConversation() {
+        // Clears both the visible chat and SAGE's server-side memory, so the
+        // next message starts a genuinely fresh conversation.
+        this.ui.clearMessages();
+        try {
+            await fetch('/api/reset-conversation', { method: 'POST' });
+            this.ui.showStatus('Started a new chat', 'success');
+        } catch (error) {
+            this.ui.showStatus(`Could not reset memory: ${error.message}`, 'error');
+        }
     }
 
     setupVisualizer() {
