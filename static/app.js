@@ -537,46 +537,17 @@ class VTCApp {
         this.isRecording = false;
         this.lastReplyAudio = null;
         this.pending = false;
-        this.memoryKey = 'sage_conversation_memory';
-        this.conversationHistory = this.loadConversationHistory();
+        // Keep recent conversation context in the browser so serverless deployments
+        // do not lose memory when requests land on different instances.
+        try {
+            this.conversationHistory = JSON.parse(localStorage.getItem('sageConversationHistory') || '[]');
+            if (!Array.isArray(this.conversationHistory)) this.conversationHistory = [];
+        } catch {
+            this.conversationHistory = [];
+        }
 
         this.setupEventListeners();
         this.setupVisualizer();
-    }
-
-    loadConversationHistory() {
-        try {
-            const saved = JSON.parse(localStorage.getItem(this.memoryKey) || '[]');
-            if (!Array.isArray(saved)) return [];
-            return saved.filter(item =>
-                item &&
-                (item.role === 'user' || item.role === 'assistant') &&
-                typeof item.content === 'string'
-            ).slice(-24);
-        } catch (error) {
-            console.warn('Could not load SAGE memory:', error);
-            return [];
-        }
-    }
-
-    saveConversationHistory() {
-        try {
-            localStorage.setItem(
-                this.memoryKey,
-                JSON.stringify(this.conversationHistory.slice(-24))
-            );
-        } catch (error) {
-            console.warn('Could not save SAGE memory:', error);
-        }
-    }
-
-    clearConversationMemory() {
-        this.conversationHistory = [];
-        try {
-            localStorage.removeItem(this.memoryKey);
-        } catch (error) {
-            console.warn('Could not clear SAGE memory:', error);
-        }
     }
 
     setVisualizerLabel(text) {
@@ -595,7 +566,8 @@ class VTCApp {
         // Clears both the visible chat and SAGE's server-side memory, so the
         // next message starts a genuinely fresh conversation.
         this.ui.clearMessages();
-        this.clearConversationMemory();
+        this.conversationHistory = [];
+        localStorage.removeItem('sageConversationHistory');
         try {
             await fetch('/api/reset-conversation', { method: 'POST' });
             this.ui.showStatus('Started a new chat', 'success');
@@ -750,12 +722,14 @@ class VTCApp {
             const assistantId = this.ui.addMessage('assistant', '', true);
             console.log('Assistant message added:', assistantId);
 
+            const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
             const response = await fetch('/api/generate-reply', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     text: clean,
-                    history: this.conversationHistory.slice(-24)
+                    history: this.conversationHistory.slice(-24),
+                    timezone
                 })
             });
 
@@ -767,15 +741,10 @@ class VTCApp {
 
             if (data.success) {
                 this.ui.updateMessage(assistantId, data.reply);
-
-                // Keep the conversation in the browser so SAGE can retain
-                // context across requests and page reloads.
-                this.conversationHistory.push(
-                    { role: 'user', content: clean },
-                    { role: 'assistant', content: data.reply }
-                );
-                this.saveConversationHistory();
-
+                this.conversationHistory.push({ role: 'user', content: clean });
+                this.conversationHistory.push({ role: 'assistant', content: data.reply });
+                this.conversationHistory = this.conversationHistory.slice(-24);
+                localStorage.setItem('sageConversationHistory', JSON.stringify(this.conversationHistory));
                 this.ui.showStatus('Response generated!', 'success');
                 await this.synthesizeAndPlaySpeech(data.reply);
             } else {
