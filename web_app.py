@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import sys
 import threading
 from flask import Flask, render_template, request, jsonify
@@ -165,6 +166,17 @@ def llm_generate_reply(user_text: str, timezone: str = "UTC") -> str:
     return reply_text
 
 
+def normalize_for_speech(text: str) -> str:
+    """Convert symbols/operators to natural spoken English for TTS only."""
+    spoken = text or ""
+    spoken = re.sub(r"(?<=\d)\s*°\s*C\b", " degrees Celsius", spoken, flags=re.I)
+    spoken = re.sub(r"(?<=\d)\s*°\s*F\b", " degrees Fahrenheit", spoken, flags=re.I)
+    spoken = re.sub(r"(\d+(?:\.\d+)?)\s*[×x]\s*(\d+(?:\.\d+)?)", r"\1 multiplied by \2", spoken)
+    spoken = spoken.replace("×", " multiplied by ")
+    spoken = re.sub(r"(?<=\d)\s*%", " percent", spoken)
+    return re.sub(r"\s{2,}", " ", spoken).strip()
+
+
 def tts_synthesize(text: str) -> bytes:
     """Synthesize text to speech and return audio bytes using ElevenLabs API directly"""
     if not text:
@@ -183,7 +195,7 @@ def tts_synthesize(text: str) -> bytes:
             "Content-Type": "application/json"
         }
         payload = {
-            "text": text,
+            "text": normalize_for_speech(text),
             "model_id": "eleven_turbo_v2_5",
             "voice_settings": {
                 "stability": 0.5,

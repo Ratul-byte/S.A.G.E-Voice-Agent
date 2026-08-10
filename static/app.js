@@ -532,6 +532,11 @@ class VTCApp {
         this.visualizer = new AudioVisualizer('audio-visualizer');
         this.caption = new LiveCaption();
         this.audioPlayer = document.getElementById('audio-player');
+        this.volumeControl = document.getElementById('volume-control');
+        this.volumeValue = document.getElementById('volume-value');
+        const savedVolume = parseFloat(localStorage.getItem('sageVoiceVolume') || '1');
+        this.voiceVolume = Number.isFinite(savedVolume) ? Math.min(1, Math.max(0, savedVolume)) : 1;
+        this.audioPlayer.volume = this.voiceVolume;
         this.visualizerLabel = document.querySelector('.visualizer-label');
 
         this.isRecording = false;
@@ -560,6 +565,20 @@ class VTCApp {
         window.addEventListener('sendMessage', (e) => this.sendMessage(e.detail.text, { addUser: true }));
         window.addEventListener('toggleRecording', () => this.toggleRecording());
         window.addEventListener('newChat', () => this.resetConversation());
+        if (this.volumeControl) {
+            this.volumeControl.value = String(Math.round(this.voiceVolume * 100));
+            this.updateVolumeLabel();
+            this.volumeControl.addEventListener('input', () => {
+                this.voiceVolume = Number(this.volumeControl.value) / 100;
+                this.audioPlayer.volume = this.voiceVolume;
+                localStorage.setItem('sageVoiceVolume', String(this.voiceVolume));
+                this.updateVolumeLabel();
+            });
+        }
+    }
+
+    updateVolumeLabel() {
+        if (this.volumeValue) this.volumeValue.textContent = `${Math.round(this.voiceVolume * 100)}%`;
     }
 
     async resetConversation() {

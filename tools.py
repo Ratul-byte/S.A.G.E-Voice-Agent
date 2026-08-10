@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import datetime as dt
 import html
+import html.parser
 import math
 import operator
 import re
@@ -39,7 +40,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the public web for current or factual information that may be newer than the model's knowledge.",
+            "description": "Search the public web and read the returned webpages for current or factual information. Use this for current events, news, recent facts, or when verification is needed. Do not treat search-result titles alone as the answer.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -140,42 +141,114 @@ def get_current_datetime(timezone: str) -> dict[str, Any]:
 
 
 class _SearchParser:
+    """Extract search-result links from DuckDuckGo HTML."""
     def __init__(self):
-        self.results: list[dict[str, str]] = []
-        self._current: dict[str, str] | None = None
-        self._capture = None
+        self.results = []
 
     def feed(self, page: str):
-        # DuckDuckGo's HTML is simple enough to extract result anchors/snippets
-        # without introducing a heavyweight HTML dependency.
         for match in re.finditer(
             r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-            page,
-            flags=re.I | re.S,
+            page, flags=re.I | re.S,
         ):
             url, title = match.groups()
-            title = re.sub(r"<[^>]+>", "", title)
-            title = html.unescape(re.sub(r"\s+", " ", title)).strip()
+            title = html.unescape(re.sub(r"<[^>]+>", " ", title))
+            title = re.sub(r"\s+", " ", title).strip()
             if url.startswith("//"):
                 url = "https:" + url
-            self.results.append({"title": title, "url": url})
-            if len(self.results) >= 6:
+            if url.startswith("http"):
+                self.results.append({"title": title, "url": url})
+            if len(self.results) >= 8:
                 break
 
 
+class _PageTextParser(html.parser.HTMLParser):
+    """Small dependency-free HTML-to-text extractor for search result pages."""
+    BLOCK_TAGS = {
+        "p", "div", "article", "section", "main", "li", "h1", "h2", "h3",
+        "h4", "h5", "h6", "br", "tr", "blockquote"
+    }
+    SKIP_TAGS = {"script", "style", "noscript", "svg", "nav", "footer", "header"}
+
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+        self.skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP_TAGS:
+            self.skip_depth += 1
+        elif self.skip_depth == 0 and tag in self.BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP_TAGS and self.skip_depth:
+            self.skip_depth -= 1
+        elif self.skip_depth == 0 and tag in self.BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if self.skip_depth == 0:
+            text = html.unescape(data).strip()
+            if text:
+                self.parts.append(text)
+
+    def text(self):
+        text = " ".join(self.parts)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+
+def _extract_page_text(url: str) -> str:
+    """Fetch and extract readable text from a result page."""
+    try:
+        r = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; SAGE/1.0)"},
+            timeout=12,
+            allow_redirects=True,
+        )
+        r.raise_for_status()
+        content_type = r.headers.get("content-type", "").lower()
+        if "text/html" not in content_type and "application/xhtml" not in content_type:
+            return ""
+        parser = _PageTextParser()
+        parser.feed(r.text[:2_000_000])
+        text = parser.text()
+        # Avoid feeding giant pages into the LLM. Keep enough context to answer questions.
+        return text[:7000]
+    except Exception:
+        return ""
+
+
 def web_search(query: str) -> dict[str, Any]:
+    """Search the web and return both results and readable page content."""
     query = query.strip()
     if not query:
         raise ValueError("Search query is empty")
+
     response = requests.get(
         "https://html.duckduckgo.com/html/?q=" + quote_plus(query),
-        headers={"User-Agent": "Mozilla/5.0 SAGE/1.0"},
-        timeout=10,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; SAGE/1.0)"},
+        timeout=12,
     )
     response.raise_for_status()
     parser = _SearchParser()
     parser.feed(response.text)
-    return {"query": query, "results": parser.results[:6]}
+
+    results = []
+    for result in parser.results[:5]:
+        content = _extract_page_text(result["url"])
+        results.append({
+            "title": result["title"],
+            "url": result["url"],
+            "content": content,
+        })
+
+    return {
+        "query": query,
+        "results": results,
+        "instruction": "Use the page content when present. Cite the source title/URL in the answer when useful. Do not claim information that is not supported by the returned content.",
+    }
 
 
 _WEATHER_CODES = {
