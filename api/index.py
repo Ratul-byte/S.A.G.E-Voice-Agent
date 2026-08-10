@@ -5,12 +5,20 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import base64
 import aiohttp
+import sys
+
+# Make the project root importable in local and serverless environments.
+sys.path.insert(0, BASE_DIR) if "BASE_DIR" in globals() else None
 
 # Load environment variables
 load_dotenv()
 
 # Get absolute paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+from prompts import SAGE_SYSTEM_PROMPT
+
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
 
@@ -54,29 +62,43 @@ def stt_transcribe_audio_bytes(audio_bytes: bytes) -> str:
     return result.get('text', '')
 
 
-def llm_generate_reply(user_text: str) -> str:
-    """Generate LLM reply using Groq"""
-    
+def llm_generate_reply(user_text: str, client_history=None) -> str:
+    """Generate a SAGE reply with the ongoing conversation context."""
+
     api_key = os.environ.get('GROQ_API_KEY', '')
     if not api_key:
         raise ValueError('GROQ_API_KEY not set in environment')
-    
+
     import requests
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+
+    messages = [{"role": "system", "content": SAGE_SYSTEM_PROMPT}]
+
+    # The browser keeps the conversation context so this also works when the
+    # API runs as a stateless/serverless function.
+    if isinstance(client_history, list):
+        for item in client_history[-24:]:
+            if not isinstance(item, dict):
+                continue
+            role = item.get('role')
+            content = item.get('content', '')
+            if role in ('user', 'assistant') and isinstance(content, str) and content.strip():
+                messages.append({"role": role, "content": content})
+
+    messages.append({"role": "user", "content": user_text})
+
     payload = {
         "model": "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "user", "content": user_text}
-        ],
+        "messages": messages,
         "temperature": 0.7,
         "max_tokens": 1024
     }
-    
-    response = requests.post(url, json=payload, headers=headers)
+
+    response = requests.post(url, headers=headers, json=payload)
     if response.status_code != 200:
         raise Exception(f"Groq API error: {response.status_code} - {response.text}")
     result = response.json()
@@ -169,7 +191,7 @@ def generate_reply():
             return jsonify({'success': False, 'error': 'No text provided'}), 400
         
         # Generate reply
-        reply = llm_generate_reply(user_text)
+        reply = llm_generate_reply(user_text, client_history)
         return jsonify({'success': True, 'reply': reply})
     
     except Exception as e:
@@ -211,3 +233,9 @@ def synthesize_speech():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': error_msg}), 500
+
+
+@app.route('/api/reset-conversation', methods=['POST'])
+def reset_conversation():
+    """Reset endpoint kept for compatibility; browser memory is client-side."""
+    return jsonify({'success': True})

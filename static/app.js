@@ -302,7 +302,7 @@ class ChatUI {
                 <circle cx="12" cy="7" r="4"/>
                </svg>`;
 
-        const roleLabel = role === 'assistant' ? 'VTC AI' : 'You';
+        const roleLabel = role === 'assistant' ? 'SAGE' : 'You';
 
         messageWrapper.innerHTML = `
             <div class="message-avatar">
@@ -537,9 +537,46 @@ class VTCApp {
         this.isRecording = false;
         this.lastReplyAudio = null;
         this.pending = false;
+        this.memoryKey = 'sage_conversation_memory';
+        this.conversationHistory = this.loadConversationHistory();
 
         this.setupEventListeners();
         this.setupVisualizer();
+    }
+
+    loadConversationHistory() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(this.memoryKey) || '[]');
+            if (!Array.isArray(saved)) return [];
+            return saved.filter(item =>
+                item &&
+                (item.role === 'user' || item.role === 'assistant') &&
+                typeof item.content === 'string'
+            ).slice(-24);
+        } catch (error) {
+            console.warn('Could not load SAGE memory:', error);
+            return [];
+        }
+    }
+
+    saveConversationHistory() {
+        try {
+            localStorage.setItem(
+                this.memoryKey,
+                JSON.stringify(this.conversationHistory.slice(-24))
+            );
+        } catch (error) {
+            console.warn('Could not save SAGE memory:', error);
+        }
+    }
+
+    clearConversationMemory() {
+        this.conversationHistory = [];
+        try {
+            localStorage.removeItem(this.memoryKey);
+        } catch (error) {
+            console.warn('Could not clear SAGE memory:', error);
+        }
     }
 
     setVisualizerLabel(text) {
@@ -558,6 +595,7 @@ class VTCApp {
         // Clears both the visible chat and SAGE's server-side memory, so the
         // next message starts a genuinely fresh conversation.
         this.ui.clearMessages();
+        this.clearConversationMemory();
         try {
             await fetch('/api/reset-conversation', { method: 'POST' });
             this.ui.showStatus('Started a new chat', 'success');
@@ -715,7 +753,10 @@ class VTCApp {
             const response = await fetch('/api/generate-reply', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: clean })
+                body: JSON.stringify({
+                    text: clean,
+                    history: this.conversationHistory.slice(-24)
+                })
             });
 
             if (!response.ok) {
@@ -726,6 +767,15 @@ class VTCApp {
 
             if (data.success) {
                 this.ui.updateMessage(assistantId, data.reply);
+
+                // Keep the conversation in the browser so SAGE can retain
+                // context across requests and page reloads.
+                this.conversationHistory.push(
+                    { role: 'user', content: clean },
+                    { role: 'assistant', content: data.reply }
+                );
+                this.saveConversationHistory();
+
                 this.ui.showStatus('Response generated!', 'success');
                 await this.synthesizeAndPlaySpeech(data.reply);
             } else {

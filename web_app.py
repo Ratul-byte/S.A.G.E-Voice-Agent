@@ -97,7 +97,7 @@ def stt_transcribe_audio_bytes(audio_bytes: bytes) -> str:
         return asyncio.run(_transcribe())
 
 
-def llm_generate_reply(user_text: str) -> str:
+def llm_generate_reply(user_text: str, client_history: list[dict] | None = None) -> str:
     """Generate LLM reply using Groq, grounded in SAGE's identity and the
     ongoing conversation history so it has context across turns."""
     llm = groq.LLM(model='llama-3.3-70b-versatile')
@@ -106,12 +106,20 @@ def llm_generate_reply(user_text: str) -> str:
     # SAGE's identity/personality always goes in first, as the system message.
     chat.add_message(role="system", content=SAGE_SYSTEM_PROMPT)
 
-    # Replay recent conversation history so the model has context.
-    with history_lock:
-        history_snapshot = list(conversation_history)
+    # Prefer conversation history supplied by the browser. This makes context
+    # survive page reloads and also works on stateless deployments such as
+    # serverless functions. Fall back to the local in-process history.
+    if client_history:
+        history_snapshot = client_history[-(MAX_HISTORY_TURNS * 2):]
+    else:
+        with history_lock:
+            history_snapshot = list(conversation_history)
 
     for turn in history_snapshot:
-        chat.add_message(role=turn['role'], content=turn['content'])
+        role = turn.get('role')
+        content = turn.get('content', '')
+        if role in ('user', 'assistant') and content:
+            chat.add_message(role=role, content=content)
 
     chat.add_message(role="user", content=user_text)
 
@@ -232,7 +240,7 @@ def generate_reply():
             return jsonify({'success': False, 'error': 'No text provided'}), 400
         
         # Generate reply
-        reply = llm_generate_reply(user_text)
+        reply = llm_generate_reply(user_text, client_history)
         return jsonify({'success': True, 'reply': reply})
     
     except Exception as e:
