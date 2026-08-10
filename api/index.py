@@ -186,6 +186,9 @@ def generate_reply():
             return jsonify({'success': False, 'error': 'No JSON data'}), 400
             
         user_text = data.get('text', '').strip()
+        client_history = data.get('history', [])
+        if not isinstance(client_history, list):
+            client_history = []
         
         if not user_text:
             return jsonify({'success': False, 'error': 'No text provided'}), 400
