@@ -68,7 +68,7 @@ def llm_generate_reply(user_text: str) -> str:
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "meta-llama/llama-prompt-guard-2-22m",
+        "model": "openai/gpt-oss-20b",
         "messages": [
             {"role": "user", "content": user_text}
         ],

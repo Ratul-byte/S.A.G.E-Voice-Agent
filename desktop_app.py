@@ -18,7 +18,7 @@ from livekit.agents.utils import AudioByteStream
 # Load environment variables
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-prompt-guard-2-22m")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
 REC_SAMPLE_RATE = 24000  # Match OpenAI/Groq STT expected sample rate
 REC_CHANNELS = 1

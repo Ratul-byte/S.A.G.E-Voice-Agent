@@ -111,7 +111,7 @@ def stt_transcribe_audioframes(frames: List[rtc.AudioFrame]) -> str:
 
 
 def llm_generate_reply(user_text: str) -> str:
-    llm = groq.LLM(model='meta-llama/llama-prompt-guard-2-22m')
+    llm = groq.LLM(model='openai/gpt-oss-20b')
     chat = ChatContext()
     # ChatRole is a Literal alias, pass role as lowercase string
     chat.add_message(role="user", content=user_text)

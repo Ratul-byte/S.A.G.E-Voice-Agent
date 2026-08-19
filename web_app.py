@@ -85,7 +85,7 @@ def stt_transcribe_audio_bytes(audio_bytes: bytes) -> str:
 
 def llm_generate_reply(user_text: str) -> str:
     """Generate LLM reply using Groq"""
-    llm = groq.LLM(model='meta-llama/llama-prompt-guard-2-22m')
+    llm = groq.LLM(model='openai/gpt-oss-20b')
     chat = ChatContext()
     chat.add_message(role="user", content=user_text)
 

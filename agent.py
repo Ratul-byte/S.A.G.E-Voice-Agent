@@ -34,7 +34,7 @@ async def entrypoint(ctx: JobContext):
         vad=silero.VAD.load(),
         # any combination of STT, LLM, TTS, or realtime API can be used
         stt=groq.STT(),  
-        llm=groq.LLM(model="meta-llama/llama-prompt-guard-2-22m"),
+        llm=groq.LLM(model="openai/gpt-oss-20b"),
         tts=elevenlabs.TTS(voice_id="EXAVITQu4vr4xnSDxMaL"), 
     )
 
