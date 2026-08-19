@@ -10,13 +10,13 @@ import numpy as np
 from typing import List
 import base64
 from io import BytesIO
+import json
 import nest_asyncio
 import aiohttp
+import requests
 
-from livekit.plugins import groq, elevenlabs
-from livekit.agents.llm.chat_context import ChatContext
-from livekit.agents.utils.audio import AudioByteStream
-from livekit import rtc
+from prompts import SAGE_SYSTEM_PROMPT
+from tools import TOOL_DEFINITIONS, execute_tool
 
 # Allow nested event loops (required for Flask threads)
 nest_asyncio.apply()
@@ -45,6 +45,10 @@ CORS(app)
 REC_SAMPLE_RATE = 24000
 REC_NUM_CHANNELS = 1
 REC_DTYPE = 'int16'
+
+# Model config — override with the GROQ_MODEL env var if you want to switch
+# without touching code. Kept in sync with api/index.py (Vercel's entry point).
+GROQ_LLM_MODEL = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-20b')
 
 
 def stt_transcribe_audio_bytes(audio_bytes: bytes) -> str:
@@ -83,33 +87,94 @@ def stt_transcribe_audio_bytes(audio_bytes: bytes) -> str:
         return asyncio.run(_transcribe())
 
 
-def llm_generate_reply(user_text: str) -> str:
-    """Generate LLM reply using Groq"""
-    llm = groq.LLM(model='openai/gpt-oss-20b')
-    chat = ChatContext()
-    chat.add_message(role="user", content=user_text)
+def _build_system_content(timezone: str, location: str | None, latitude, longitude) -> str:
+    """SAGE's identity plus the user's current time/place context, so it
+    doesn't have to ask for information the browser already knows."""
+    content = SAGE_SYSTEM_PROMPT + (
+        f"\n\nThe user's current browser timezone is {timezone}. "
+        "When the user asks for the current date/time without naming a place, "
+        "use that timezone with the date/time tool."
+    )
 
-    async def _generate():
-        stream = llm.chat(chat_ctx=chat, tools=[], parallel_tool_calls=False)
-        reply: list[str] = []
-        try:
-            async for chunk in stream:
-                if chunk.delta and chunk.delta.content:
-                    reply.append(chunk.delta.content)
-        finally:
-            await stream.aclose()
-        return ''.join(reply).strip()
-    
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # If loop is already running, create a new one
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_generate())
-    except RuntimeError:
-        # No event loop in this thread, create one
-        return asyncio.run(_generate())
+    if location:
+        content += f" The user's current approximate location is {location}."
+    elif latitude is not None and longitude is not None:
+        content += (
+            f" The user's current approximate coordinates are "
+            f"latitude {latitude}, longitude {longitude}."
+        )
+
+    if location or (latitude is not None and longitude is not None):
+        content += (
+            " When the user asks about local weather, time, or other "
+            "place-dependent questions without naming a different place, "
+            "use this location instead of asking them where they are."
+        )
+
+    return content
+
+
+def llm_generate_reply(
+    user_text: str,
+    history=None,
+    timezone: str = "UTC",
+    location: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+) -> str:
+    """Generate a reply with conversation context, location awareness, and
+    callable SAGE tools (weather, search, calculator, date/time)."""
+    api_key = os.environ.get('GROQ_API_KEY', '')
+    if not api_key:
+        raise ValueError('GROQ_API_KEY not set in environment')
+
+    messages = [
+        {
+            "role": "system",
+            "content": _build_system_content(timezone, location, latitude, longitude),
+        }
+    ]
+    for item in (history or [])[-24:]:
+        if isinstance(item, dict) and item.get('role') in ('user', 'assistant') and item.get('content'):
+            messages.append({"role": item['role'], "content": str(item['content'])})
+    messages.append({"role": "user", "content": user_text})
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    for _ in range(4):
+        payload = {
+            "model": GROQ_LLM_MODEL,
+            "messages": messages,
+            "tools": TOOL_DEFINITIONS,
+            "tool_choice": "auto",
+            "temperature": 0.7,
+            "max_tokens": 1024,
+        }
+        response = requests.post(url, json=payload, headers=headers, timeout=45)
+        if response.status_code != 200:
+            raise Exception(f"Groq API error: {response.status_code} - {response.text}")
+        message = response.json()['choices'][0]['message']
+        tool_calls = message.get('tool_calls') or []
+        if not tool_calls:
+            return (message.get('content') or '').strip()
+
+        # The assistant tool-call message must be replayed before tool results.
+        messages.append(message)
+        for call in tool_calls:
+            name = call['function']['name']
+            try:
+                arguments = json.loads(call['function'].get('arguments') or '{}')
+                result = execute_tool(name, arguments)
+            except Exception as exc:
+                result = {"error": str(exc)}
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call['id'],
+                "content": json.dumps(result, ensure_ascii=False),
+            })
+
+    raise RuntimeError('SAGE reached the maximum number of tool calls for this request')
 
 
 def tts_synthesize(text: str) -> bytes:
@@ -190,12 +255,27 @@ def generate_reply():
     try:
         data = request.json
         user_text = data.get('text', '').strip()
-        
+
         if not user_text:
             return jsonify({'success': False, 'error': 'No text provided'}), 400
-        
-        # Generate reply
-        reply = llm_generate_reply(user_text)
+
+        history = data.get('history', [])
+        if not isinstance(history, list):
+            history = []
+        timezone = data.get('timezone', 'UTC') or 'UTC'
+        location = data.get('location') or None
+        latitude = data.get('latitude')
+        longitude = data.get('longitude')
+
+        # Generate reply with the browser's timezone/location and recent conversation.
+        reply = llm_generate_reply(
+            user_text,
+            history=history,
+            timezone=timezone,
+            location=location,
+            latitude=latitude,
+            longitude=longitude,
+        )
         return jsonify({'success': True, 'reply': reply})
     
     except Exception as e:
@@ -204,6 +284,14 @@ def generate_reply():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': error_msg}), 500
+
+
+@app.route('/api/reset-conversation', methods=['POST'])
+def reset_conversation():
+    """Conversation memory now lives client-side (sent as `history` with each
+    request), so there's nothing to clear server-side - this just exists so
+    the frontend's reset call has something to hit."""
+    return jsonify({'success': True})
 
 
 @app.route('/api/synthesize-speech', methods=['POST'])

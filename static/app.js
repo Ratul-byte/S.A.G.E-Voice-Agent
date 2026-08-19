@@ -551,8 +551,57 @@ class VTCApp {
             this.conversationHistory = [];
         }
 
+        // Browser location, so SAGE can answer "what's the weather/time" without
+        // asking where you are, unless you name a different place.
+        this.userLocation = { label: null, latitude: null, longitude: null };
+        try {
+            const cached = JSON.parse(localStorage.getItem('sageUserLocation') || 'null');
+            if (cached && (cached.label || (cached.latitude && cached.longitude))) {
+                this.userLocation = cached;
+            }
+        } catch { /* ignore malformed cache */ }
+        this.initLocation();
+
         this.setupEventListeners();
         this.setupVisualizer();
+    }
+
+    initLocation() {
+        if (!navigator.geolocation) return;
+
+        navigator.geolocation.getCurrentPosition(
+            async (position) => {
+                const { latitude, longitude } = position.coords;
+                this.userLocation.latitude = latitude;
+                this.userLocation.longitude = longitude;
+                const label = await this.reverseGeocode(latitude, longitude);
+                if (label) this.userLocation.label = label;
+                localStorage.setItem('sageUserLocation', JSON.stringify(this.userLocation));
+            },
+            (error) => {
+                // Permission denied or unavailable - SAGE will just ask when it needs to know.
+                console.warn('Geolocation unavailable:', error.message);
+            },
+            { enableHighAccuracy: false, timeout: 8000, maximumAge: 3600000 }
+        );
+    }
+
+    async reverseGeocode(latitude, longitude) {
+        try {
+            const res = await fetch(
+                `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&zoom=10`
+            );
+            if (!res.ok) return null;
+            const data = await res.json();
+            const addr = data.address || {};
+            const city = addr.city || addr.town || addr.village || addr.suburb || addr.county;
+            const region = addr.state;
+            const country = addr.country;
+            return [city, region, country].filter(Boolean).join(', ') || data.display_name || null;
+        } catch (error) {
+            console.warn('Reverse geocoding failed:', error);
+            return null;
+        }
     }
 
     setVisualizerLabel(text) {
@@ -748,7 +797,10 @@ class VTCApp {
                 body: JSON.stringify({
                     text: clean,
                     history: this.conversationHistory.slice(-24),
-                    timezone
+                    timezone,
+                    location: this.userLocation.label,
+                    latitude: this.userLocation.latitude,
+                    longitude: this.userLocation.longitude
                 })
             });
 
