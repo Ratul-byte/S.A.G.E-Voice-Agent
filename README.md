@@ -1,6 +1,6 @@
 # SAGE — Smart Agent for Guided Execution
 
-**SAGE** is a modern web-based AI assistant that supports both text and voice interaction. It combines conversational memory, real-time voice capabilities, AI reasoning, web access, and practical utility tools into a single assistant. SAGE uses **Groq/Llama** for language generation, **Groq STT** for speech recognition, and **ElevenLabs** for text-to-speech.
+**SAGE** is a modern web-based AI assistant that supports both text and voice interaction. It combines conversational memory, real-time voice capabilities, AI reasoning, web access, and practical utility tools into a single assistant. SAGE uses **Groq** for language generation, **Groq STT** for speech recognition, and **ElevenLabs** for text-to-speech.
 
 ---
 
@@ -98,7 +98,7 @@ The displayed response can retain normal symbols while the speech output is norm
 - **Python**
 - **Flask** — web application/API
 - **Groq** — llm and speech-to-text
-- **Llama 3.3 70B** — language model
+- **GPT OSS-20B** — language model
 - **Whisper Large-V3** - stt model
 - **ElevenLabs** — text-to-speech
 - **LiveKit Agents** — voice-agent integration
