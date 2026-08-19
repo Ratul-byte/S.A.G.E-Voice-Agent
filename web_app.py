@@ -1,6 +1,5 @@
 import asyncio
 import os
-import re
 import sys
 import threading
 from flask import Flask, render_template, request, jsonify
@@ -13,16 +12,11 @@ import base64
 from io import BytesIO
 import nest_asyncio
 import aiohttp
-import json
-import requests
 
 from livekit.plugins import groq, elevenlabs
 from livekit.agents.llm.chat_context import ChatContext
 from livekit.agents.utils.audio import AudioByteStream
 from livekit import rtc
-
-from prompts import SAGE_SYSTEM_PROMPT
-from tools import TOOL_DEFINITIONS, execute_tool
 
 # Allow nested event loops (required for Flask threads)
 nest_asyncio.apply()
@@ -51,18 +45,6 @@ CORS(app)
 REC_SAMPLE_RATE = 24000
 REC_NUM_CHANNELS = 1
 REC_DTYPE = 'int16'
-
-# --- Conversation memory --------------------------------------------------
-# This is a single-user local assistant (one browser talking to one server
-# process), so a simple in-process history is enough to give SAGE context
-# across turns - no need for per-session/database complexity.
-conversation_history: List[dict] = []
-history_lock = threading.Lock()
-
-# Cap how many past turns we send back to the LLM each time, to keep token
-# usage/latency bounded. A "turn" here is one user message + one assistant
-# reply, so this keeps roughly the last 12 exchanges.
-MAX_HISTORY_TURNS = 12
 
 
 def stt_transcribe_audio_bytes(audio_bytes: bytes) -> str:
@@ -101,80 +83,33 @@ def stt_transcribe_audio_bytes(audio_bytes: bytes) -> str:
         return asyncio.run(_transcribe())
 
 
-def llm_generate_reply(user_text: str, timezone: str = "UTC") -> str:
-    """Generate a reply with SAGE's memory and callable tools."""
-    api_key = os.environ.get('GROQ_API_KEY', '')
-    if not api_key:
-        raise ValueError('GROQ_API_KEY not set in environment')
+def llm_generate_reply(user_text: str) -> str:
+    """Generate LLM reply using Groq"""
+    llm = groq.LLM(model='meta-llama/llama-prompt-guard-2-22m')
+    chat = ChatContext()
+    chat.add_message(role="user", content=user_text)
 
-    with history_lock:
-        history_snapshot = list(conversation_history)
-
-    messages = [{
-        "role": "system",
-        "content": SAGE_SYSTEM_PROMPT + f"\n\nThe user's current browser timezone is {timezone}. When the user asks for the current date/time without naming a place, use that timezone with the date/time tool."
-    }]
-    for turn in history_snapshot:
-        messages.append({"role": turn['role'], "content": turn['content']})
-    messages.append({"role": "user", "content": user_text})
-
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-    reply_text = None
-    for _ in range(4):
-        payload = {
-            "model": "llama-3.3-70b-versatile",
-            "messages": messages,
-            "tools": TOOL_DEFINITIONS,
-            "tool_choice": "auto",
-            "temperature": 0.7,
-            "max_tokens": 1024,
-        }
-        response = requests.post(url, json=payload, headers=headers, timeout=45)
-        if response.status_code != 200:
-            raise Exception(f"Groq API error: {response.status_code} - {response.text}")
-        message = response.json()['choices'][0]['message']
-        tool_calls = message.get('tool_calls') or []
-        if not tool_calls:
-            reply_text = (message.get('content') or '').strip()
-            break
-
-        messages.append(message)
-        for call in tool_calls:
-            try:
-                args = json.loads(call['function'].get('arguments') or '{}')
-                result = execute_tool(call['function']['name'], args)
-            except Exception as exc:
-                result = {"error": str(exc)}
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call['id'],
-                "content": json.dumps(result, ensure_ascii=False),
-            })
-
-    if reply_text is None:
-        raise RuntimeError('SAGE reached the maximum number of tool calls for this request')
-
-    with history_lock:
-        conversation_history.append({'role': 'user', 'content': user_text})
-        conversation_history.append({'role': 'assistant', 'content': reply_text})
-        max_messages = MAX_HISTORY_TURNS * 2
-        if len(conversation_history) > max_messages:
-            del conversation_history[:len(conversation_history) - max_messages]
-
-    return reply_text
-
-
-def normalize_for_speech(text: str) -> str:
-    """Convert symbols/operators to natural spoken English for TTS only."""
-    spoken = text or ""
-    spoken = re.sub(r"(?<=\d)\s*°\s*C\b", " degrees Celsius", spoken, flags=re.I)
-    spoken = re.sub(r"(?<=\d)\s*°\s*F\b", " degrees Fahrenheit", spoken, flags=re.I)
-    spoken = re.sub(r"(\d+(?:\.\d+)?)\s*[×x]\s*(\d+(?:\.\d+)?)", r"\1 multiplied by \2", spoken)
-    spoken = spoken.replace("×", " multiplied by ")
-    spoken = re.sub(r"(?<=\d)\s*%", " percent", spoken)
-    return re.sub(r"\s{2,}", " ", spoken).strip()
+    async def _generate():
+        stream = llm.chat(chat_ctx=chat, tools=[], parallel_tool_calls=False)
+        reply: list[str] = []
+        try:
+            async for chunk in stream:
+                if chunk.delta and chunk.delta.content:
+                    reply.append(chunk.delta.content)
+        finally:
+            await stream.aclose()
+        return ''.join(reply).strip()
+    
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If loop is already running, create a new one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_generate())
+    except RuntimeError:
+        # No event loop in this thread, create one
+        return asyncio.run(_generate())
 
 
 def tts_synthesize(text: str) -> bytes:
@@ -195,7 +130,7 @@ def tts_synthesize(text: str) -> bytes:
             "Content-Type": "application/json"
         }
         payload = {
-            "text": normalize_for_speech(text),
+            "text": text,
             "model_id": "eleven_turbo_v2_5",
             "voice_settings": {
                 "stability": 0.5,
@@ -255,13 +190,12 @@ def generate_reply():
     try:
         data = request.json
         user_text = data.get('text', '').strip()
-        timezone = data.get('timezone', 'UTC') or 'UTC'
         
         if not user_text:
             return jsonify({'success': False, 'error': 'No text provided'}), 400
         
         # Generate reply
-        reply = llm_generate_reply(user_text, timezone=timezone)
+        reply = llm_generate_reply(user_text)
         return jsonify({'success': True, 'reply': reply})
     
     except Exception as e:
@@ -300,14 +234,6 @@ def synthesize_speech():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': error_msg}), 500
-
-
-@app.route('/api/reset-conversation', methods=['POST'])
-def reset_conversation():
-    """Clear SAGE's conversation memory and start a fresh context."""
-    with history_lock:
-        conversation_history.clear()
-    return jsonify({'success': True})
 
 
 if __name__ == '__main__':
