@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import base64
 import aiohttp
 import json
+import re
 import requests
 
 from prompts import SAGE_SYSTEM_PROMPT
@@ -143,10 +144,61 @@ def llm_generate_reply(
     raise RuntimeError('SAGE reached the maximum number of tool calls for this request')
 
 
+_DEGREE_UNIT_PATTERN = re.compile(r'(-?\d+(?:\.\d+)?)\s*°\s*([CF])\b')
+_PERCENT_PATTERN = re.compile(r'(\d+(?:\.\d+)?)\s*%')
+_MD_BOLD_PATTERN = re.compile(r'\*\*(.*?)\*\*')
+_MD_ITALIC_PATTERN = re.compile(r'(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)')
+_MD_HEADER_PATTERN = re.compile(r'^#{1,6}\s*', re.MULTILINE)
+_MD_BULLET_PATTERN = re.compile(r'^\s*[-*]\s+', re.MULTILINE)
+
+_UNIT_WORDS = [
+    (re.compile(r'\bkm/h\b', re.IGNORECASE), 'kilometers per hour'),
+    (re.compile(r'\bkmh\b', re.IGNORECASE), 'kilometers per hour'),
+    (re.compile(r'\bmph\b', re.IGNORECASE), 'miles per hour'),
+    (re.compile(r'\bm/s\b', re.IGNORECASE), 'meters per second'),
+    (re.compile(r'\bhPa\b'), 'hectopascals'),
+]
+
+_DEGREE_WORD = {'C': 'degrees Celsius', 'F': 'degrees Fahrenheit'}
+
+
+def normalize_for_speech(text: str) -> str:
+    """Rewrite a reply so ElevenLabs speaks units/symbols/markdown naturally
+    (e.g. "36.5 °C" -> "36.5 degrees Celsius", "98%" -> "98 percent").
+    This only affects what gets spoken - the chat UI still shows the original
+    text with the real symbols/formatting."""
+    if not text:
+        return text
+
+    result = _DEGREE_UNIT_PATTERN.sub(
+        lambda m: f"{m.group(1)} {_DEGREE_WORD[m.group(2).upper()]}", text
+    )
+    # Any leftover degree symbol (angles, unspecified scale, etc.)
+    result = result.replace('°', ' degrees ')
+    result = _PERCENT_PATTERN.sub(r'\1 percent', result)
+
+    for pattern, replacement in _UNIT_WORDS:
+        result = pattern.sub(replacement, result)
+
+    # Strip markdown formatting so it isn't read out literally.
+    result = _MD_BOLD_PATTERN.sub(r'\1', result)
+    result = _MD_ITALIC_PATTERN.sub(r'\1', result)
+    result = _MD_HEADER_PATTERN.sub('', result)
+    result = _MD_BULLET_PATTERN.sub('', result)
+    result = result.replace('`', '')
+
+    # Collapse whitespace left behind by the substitutions above.
+    result = re.sub(r'[ \t]+', ' ', result)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    return result.strip()
+
+
 def tts_synthesize(text: str) -> bytes:
     """Synthesize text to speech and return audio bytes using ElevenLabs API directly"""
     if not text:
         return b''
+
+    text = normalize_for_speech(text)
     
     api_key = os.environ.get('ELEVEN_API_KEY', '')
     voice_id = os.environ.get('ELEVEN_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL')
