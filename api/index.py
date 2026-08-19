@@ -5,11 +5,6 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import base64
 import aiohttp
-import json
-import requests
-
-from prompts import SAGE_SYSTEM_PROMPT
-from tools import TOOL_DEFINITIONS, execute_tool
 
 # Load environment variables
 load_dotenv()
@@ -59,59 +54,33 @@ def stt_transcribe_audio_bytes(audio_bytes: bytes) -> str:
     return result.get('text', '')
 
 
-def llm_generate_reply(user_text: str, history=None, timezone: str = "UTC") -> str:
-    """Generate a reply with conversation context and callable SAGE tools."""
+def llm_generate_reply(user_text: str) -> str:
+    """Generate LLM reply using Groq"""
+    
     api_key = os.environ.get('GROQ_API_KEY', '')
     if not api_key:
         raise ValueError('GROQ_API_KEY not set in environment')
-
-    messages = [
-        {
-            "role": "system",
-            "content": SAGE_SYSTEM_PROMPT + f"\n\nThe user's current browser timezone is {timezone}. When the user asks for the current date/time without naming a place, use that timezone with the date/time tool."
-        }
-    ]
-    for item in (history or [])[-24:]:
-        if isinstance(item, dict) and item.get('role') in ('user', 'assistant') and item.get('content'):
-            messages.append({"role": item['role'], "content": str(item['content'])})
-    messages.append({"role": "user", "content": user_text})
-
+    
+    import requests
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-    for _ in range(4):
-        payload = {
-            "model": "llama-3.3-70b-versatile",
-            "messages": messages,
-            "tools": TOOL_DEFINITIONS,
-            "tool_choice": "auto",
-            "temperature": 0.7,
-            "max_tokens": 1024,
-        }
-        response = requests.post(url, json=payload, headers=headers, timeout=45)
-        if response.status_code != 200:
-            raise Exception(f"Groq API error: {response.status_code} - {response.text}")
-        message = response.json()['choices'][0]['message']
-        tool_calls = message.get('tool_calls') or []
-        if not tool_calls:
-            return (message.get('content') or '').strip()
-
-        # The assistant tool-call message must be replayed before tool results.
-        messages.append(message)
-        for call in tool_calls:
-            name = call['function']['name']
-            try:
-                arguments = json.loads(call['function'].get('arguments') or '{}')
-                result = execute_tool(name, arguments)
-            except Exception as exc:
-                result = {"error": str(exc)}
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call['id'],
-                "content": json.dumps(result, ensure_ascii=False),
-            })
-
-    raise RuntimeError('SAGE reached the maximum number of tool calls for this request')
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "openai/gpt-oss-20b",
+        "messages": [
+            {"role": "user", "content": user_text}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 1024
+    }
+    
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code != 200:
+        raise Exception(f"Groq API error: {response.status_code} - {response.text}")
+    result = response.json()
+    return result['choices'][0]['message']['content'].strip()
 
 
 def tts_synthesize(text: str) -> bytes:
@@ -195,17 +164,12 @@ def generate_reply():
             return jsonify({'success': False, 'error': 'No JSON data'}), 400
             
         user_text = data.get('text', '').strip()
-        history = data.get('history', [])
-        timezone = data.get('timezone', 'UTC') or 'UTC'
-
+        
         if not user_text:
             return jsonify({'success': False, 'error': 'No text provided'}), 400
-
-        if not isinstance(history, list):
-            history = []
-
-        # Generate reply with the browser's timezone and recent conversation.
-        reply = llm_generate_reply(user_text, history=history, timezone=timezone)
+        
+        # Generate reply
+        reply = llm_generate_reply(user_text)
         return jsonify({'success': True, 'reply': reply})
     
     except Exception as e:
